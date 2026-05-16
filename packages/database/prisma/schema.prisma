@@ -1,7 +1,11 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
+// ShipLog — multi-tenant changelog SaaS
+// Conventions:
+//   * UUID primary keys, snake_case table/column names via @@map / @map.
+//   * Timestamps are TIMESTAMPTZ(6); soft deletes only on workspaces, projects,
+//     changelogs, and changelog_items.
+//   * Three partial indexes are NOT defined here — see prisma/sql/partial_indexes.sql
+//     and the migration steps in the package README. Prisma 7 has no native
+//     partial-index syntax, so they live in a hand-written migration.
 
 generator client {
   provider = "prisma-client"
@@ -10,4 +14,571 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum Plan {
+  free
+  pro
+  scale
+
+  @@map("plan")
+}
+
+enum Role {
+  owner
+  admin
+  editor
+  viewer
+
+  @@map("role")
+}
+
+enum AccountType {
+  user
+  org
+
+  @@map("account_type")
+}
+
+enum BrandTone {
+  professional
+  friendly
+  witty
+  excited
+
+  @@map("brand_tone")
+}
+
+enum ItemCategory {
+  feature
+  improvement
+  fix
+  breaking
+
+  @@map("item_category")
+}
+
+enum ItemStatus {
+  draft
+  grouped
+  published
+  discarded
+
+  @@map("item_status")
+}
+
+enum ChangelogStatus {
+  draft
+  scheduled
+  published
+
+  @@map("changelog_status")
+}
+
+enum AiPurpose {
+  draft_generation
+  regenerate
+  audience_variant
+  social_variant
+
+  @@map("ai_purpose")
+}
+
+// ============================================================================
+// Auth (Better Auth-compatible)
+// ============================================================================
+
+/// Core user identity. Linked to OAuth/credentials via Account, and to
+/// workspaces via WorkspaceMember (many-to-many).
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique
+  name          String?
+  image         String?
+  emailVerified Boolean  @default(false) @map("email_verified")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  accounts            Account[]
+  sessions            Session[]
+  ownedWorkspaces     Workspace[]            @relation("WorkspaceOwner")
+  memberships         WorkspaceMember[]
+  sentInvitations     WorkspaceInvitation[]
+  installedApps       GithubInstallation[]
+  createdItems        ChangelogItem[]        @relation("ItemCreator")
+  editedItems         ChangelogItem[]        @relation("ItemLastEditor")
+  publishedChangelogs Changelog[]
+  itemVersions        ChangelogItemVersion[]
+  auditLogs           AuditLog[]
+
+  @@map("users")
+}
+
+/// OAuth provider link or credentials record. A user can have multiple
+/// (e.g. GitHub OAuth + email/password).
+model Account {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  providerId   String    @map("provider_id")
+  accountId    String    @map("account_id")
+  accessToken  String?   @map("access_token")
+  refreshToken String?   @map("refresh_token")
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(6)
+  passwordHash String?   @map("password_hash")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// Active login session. Cookie-value `token` is what the client presents.
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ============================================================================
+// Workspaces & teams
+// ============================================================================
+
+/// Billing unit. One workspace = one team = one Stripe customer. Soft-deletable
+/// with a 30-day recovery window.
+model Workspace {
+  id                   String    @id @default(uuid()) @db.Uuid
+  name                 String
+  slug                 String    @unique
+  ownerId              String    @map("owner_id") @db.Uuid
+  plan                 Plan      @default(free)
+  stripeCustomerId     String?   @unique @map("stripe_customer_id")
+  stripeSubscriptionId String?   @unique @map("stripe_subscription_id")
+  trialEndsAt          DateTime? @map("trial_ends_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt            DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  owner               User                  @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  members             WorkspaceMember[]
+  invitations         WorkspaceInvitation[]
+  githubInstallations GithubInstallation[]
+  projects            Project[]
+  auditLogs           AuditLog[]
+
+  @@index([ownerId])
+  @@map("workspaces")
+}
+
+/// Join table between users and workspaces, with role-based permissions.
+/// `joinedAt` is preserved separately from `createdAt` so re-invites can move
+/// the membership row without losing the original join timestamp.
+model WorkspaceMember {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  role        Role
+  joinedAt    DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+/// Pending invite. `token` is the unique slug embedded in the invite URL.
+/// `invitedBy` is nullable so we can preserve the invite trail if the
+/// inviter's user record is later removed.
+model WorkspaceInvitation {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  email       String
+  role        Role
+  token       String    @unique
+  invitedBy   String?   @map("invited_by") @db.Uuid
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  acceptedAt  DateTime? @map("accepted_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  inviter   User?     @relation(fields: [invitedBy], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([email])
+  @@map("workspace_invitations")
+}
+
+// ============================================================================
+// GitHub integration
+// ============================================================================
+
+/// GitHub App installation belonging to a workspace. Installation tokens
+/// expire in 1h, so we mint them on demand from the App's private key —
+/// nothing token-shaped is stored here. `revokedAt` lets us tombstone an
+/// uninstalled record without losing audit trail.
+model GithubInstallation {
+  id                String      @id @default(uuid()) @db.Uuid
+  workspaceId       String      @map("workspace_id") @db.Uuid
+  installationId    BigInt      @unique @map("installation_id")
+  accountType       AccountType @map("account_type")
+  accountLogin      String      @map("account_login")
+  accountId         BigInt      @map("account_id")
+  targetId          BigInt      @map("target_id")
+  repositoriesCount Int         @default(0) @map("repositories_count")
+  installedByUserId String?     @map("installed_by_user_id") @db.Uuid
+  installedAt       DateTime    @default(now()) @map("installed_at") @db.Timestamptz(6)
+  revokedAt         DateTime?   @map("revoked_at") @db.Timestamptz(6)
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  installedBy User?     @relation(fields: [installedByUserId], references: [id], onDelete: SetNull)
+  projects    Project[]
+
+  @@index([workspaceId])
+  @@index([accountId])
+  @@map("github_installations")
+}
+
+// ============================================================================
+// Projects
+// ============================================================================
+
+/// One project tracks one GitHub repo and produces one changelog stream.
+/// `widgetToken` is the public auth value the embed widget uses (project-
+/// scoped, rotatable). `brandVoiceContext` accumulates the last ~50 founder
+/// edits as few-shot examples for AI prompting; trimmed by a background job.
+model Project {
+  id                String    @id @default(uuid()) @db.Uuid
+  workspaceId       String    @map("workspace_id") @db.Uuid
+  installationId    String    @map("installation_id") @db.Uuid
+  name              String
+  slug              String
+  githubRepoId      BigInt    @map("github_repo_id")
+  githubRepoName    String    @map("github_repo_name")
+  defaultBranch     String    @default("main") @map("default_branch")
+  customDomain      String?   @unique @map("custom_domain")
+  widgetToken       String    @unique @map("widget_token")
+  brandVoiceContext String?   @map("brand_voice_context")
+  brandTone         BrandTone @default(professional) @map("brand_tone")
+  brandDescription  String?   @map("brand_description")
+  logoUrl           String?   @map("logo_url")
+  accentColor       String?   @map("accent_color")
+  emailFromName     String?   @map("email_from_name")
+  emailReplyTo      String?   @map("email_reply_to")
+  autoPublish       Boolean   @default(false) @map("auto_publish")
+  isActive          Boolean   @default(true) @map("is_active")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  workspace      Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  installation   GithubInstallation @relation(fields: [installationId], references: [id], onDelete: Restrict)
+  settings       ProjectSettings?
+  changelogs     Changelog[]
+  changelogItems ChangelogItem[]
+  subscribers    EmailSubscriber[]
+  aiGenerations  AiGeneration[]
+  widgetViews    WidgetView[]
+  pageViews      PageView[]
+
+  @@unique([workspaceId, slug])
+  @@index([installationId])
+  // Note: idx_projects_workspace is partial — see prisma/sql/partial_indexes.sql
+  @@map("projects")
+}
+
+/// Per-project knobs split out for cleanliness. 1-1 with Project.
+model ProjectSettings {
+  id                     String   @id @default(uuid()) @db.Uuid
+  projectId              String   @unique @map("project_id") @db.Uuid
+  autoCaptureScreenshots Boolean  @default(false) @map("auto_capture_screenshots")
+  enabledChannels        Json     @default("{\"page\":true,\"email\":true,\"widget\":true,\"social\":false}") @map("enabled_channels")
+  enabledAudiences       Json     @default("{\"customer\":true,\"developer\":false,\"executive\":false}") @map("enabled_audiences")
+  autoPostXHandle        String?  @map("auto_post_x_handle")
+  slackWebhookUrl        String?  @map("slack_webhook_url")
+  excludedPrLabels       String[] @default([]) @map("excluded_pr_labels")
+  excludedFiles          String[] @default([]) @map("excluded_files")
+  minPrSize              Int?     @map("min_pr_size")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_settings")
+}
+
+// ============================================================================
+// Changelog content
+// ============================================================================
+
+/// The atomic "thing that shipped." Drafted by AI from one or more PRs, then
+/// human-edited and grouped into a Changelog. `audienceVariants` and
+/// `sourcePrData` are JSONB so we can evolve AI output shape without
+/// migrations. `aiRawOutput` is the immutable original generation, kept for
+/// debugging and future training.
+model ChangelogItem {
+  id               String       @id @default(uuid()) @db.Uuid
+  projectId        String       @map("project_id") @db.Uuid
+  changelogId      String?      @map("changelog_id") @db.Uuid
+  theme            String?
+  headline         String
+  body             String
+  category         ItemCategory @default(feature)
+  audienceVariants Json?        @map("audience_variants")
+  sourcePrIds      Int[]        @default([]) @map("source_pr_ids")
+  sourcePrData     Json?        @map("source_pr_data")
+  aiRawOutput      Json?        @map("ai_raw_output")
+  aiModel          String?      @map("ai_model")
+  aiGenerationId   String?      @map("ai_generation_id") @db.Uuid
+  screenshotUrl    String?      @map("screenshot_url")
+  status           ItemStatus   @default(draft)
+  position         Int          @default(0)
+  createdBy        String?      @map("created_by") @db.Uuid
+  lastEditedBy     String?      @map("last_edited_by") @db.Uuid
+  lastEditedAt     DateTime?    @map("last_edited_at") @db.Timestamptz(6)
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt        DateTime?    @map("deleted_at") @db.Timestamptz(6)
+
+  project      Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  changelog    Changelog?             @relation(fields: [changelogId], references: [id], onDelete: SetNull)
+  creator      User?                  @relation("ItemCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  lastEditor   User?                  @relation("ItemLastEditor", fields: [lastEditedBy], references: [id], onDelete: SetNull)
+  aiGeneration AiGeneration?          @relation(fields: [aiGenerationId], references: [id], onDelete: SetNull)
+  versions     ChangelogItemVersion[]
+
+  @@index([projectId, status])
+  @@index([changelogId, position])
+  @@map("changelog_items")
+}
+
+/// A published "release" customers see — a curated collection of items.
+/// `channelsPublished` tracks per-channel publish state (page/email/widget).
+model Changelog {
+  id                String          @id @default(uuid()) @db.Uuid
+  projectId         String          @map("project_id") @db.Uuid
+  title             String
+  slug              String
+  summary           String?
+  version           String?
+  status            ChangelogStatus @default(draft)
+  publishedAt       DateTime?       @map("published_at") @db.Timestamptz(6)
+  scheduledFor      DateTime?       @map("scheduled_for") @db.Timestamptz(6)
+  ogImageUrl        String?         @map("og_image_url")
+  viewCount         Int             @default(0) @map("view_count")
+  publishedBy       String?         @map("published_by") @db.Uuid
+  channelsPublished Json?           @map("channels_published")
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime?       @map("deleted_at") @db.Timestamptz(6)
+
+  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  publisher   User?           @relation(fields: [publishedBy], references: [id], onDelete: SetNull)
+  items       ChangelogItem[]
+  emailSends  EmailSend[]
+  widgetViews WidgetView[]
+  pageViews   PageView[]
+
+  @@unique([projectId, slug])
+  // Note: idx_changelogs_project_published is partial — see prisma/sql/partial_indexes.sql
+  @@map("changelogs")
+}
+
+/// Full edit history per item. `editDistance` powers brand-voice learning:
+/// high-distance edits are the most informative signal for the AI.
+model ChangelogItemVersion {
+  id              String   @id @default(uuid()) @db.Uuid
+  changelogItemId String   @map("changelog_item_id") @db.Uuid
+  headline        String
+  body            String
+  editedBy        String?  @map("edited_by") @db.Uuid
+  editDistance    Int?     @map("edit_distance")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  item   ChangelogItem @relation(fields: [changelogItemId], references: [id], onDelete: Cascade)
+  editor User?         @relation(fields: [editedBy], references: [id], onDelete: SetNull)
+
+  @@index([changelogItemId, createdAt])
+  @@map("changelog_item_versions")
+}
+
+// ============================================================================
+// Subscribers & email
+// ============================================================================
+
+/// End-users (the founder's customers) subscribed to a project's updates.
+/// Double opt-in via `confirmationToken` → `confirmedAt`.
+model EmailSubscriber {
+  id                String    @id @default(uuid()) @db.Uuid
+  projectId         String    @map("project_id") @db.Uuid
+  email             String
+  name              String?
+  isConfirmed       Boolean   @default(false) @map("is_confirmed")
+  confirmationToken String?   @unique @map("confirmation_token")
+  confirmedAt       DateTime? @map("confirmed_at") @db.Timestamptz(6)
+  unsubscribedAt    DateTime? @map("unsubscribed_at") @db.Timestamptz(6)
+  source            String?
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, email])
+  // Note: idx_email_subscribers_project is partial — see prisma/sql/partial_indexes.sql
+  @@map("email_subscribers")
+}
+
+/// One row per email batch sent. Open/click/bounce counts are updated by
+/// Resend webhooks; `resendBatchId` cross-references their dashboard.
+model EmailSend {
+  id             String   @id @default(uuid()) @db.Uuid
+  changelogId    String   @map("changelog_id") @db.Uuid
+  recipientCount Int      @map("recipient_count")
+  sentAt         DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
+  resendBatchId  String?  @map("resend_batch_id")
+  openCount      Int      @default(0) @map("open_count")
+  clickCount     Int      @default(0) @map("click_count")
+  bounceCount    Int      @default(0) @map("bounce_count")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  changelog Changelog @relation(fields: [changelogId], references: [id], onDelete: Cascade)
+
+  @@index([changelogId])
+  @@map("email_sends")
+}
+
+// ============================================================================
+// AI, analytics, audit
+// ============================================================================
+
+/// Log row per AI call. Powers cost-per-customer reporting, latency tracking,
+/// and quality debugging. `input`/`output` are full JSONB blobs.
+model AiGeneration {
+  id               String    @id @default(uuid()) @db.Uuid
+  projectId        String    @map("project_id") @db.Uuid
+  model            String
+  promptTokens     Int       @map("prompt_tokens")
+  completionTokens Int       @map("completion_tokens")
+  costUsdCents     Int       @map("cost_usd_cents")
+  latencyMs        Int       @map("latency_ms")
+  purpose          AiPurpose
+  input            Json
+  output           Json?
+  error            String?
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  changelogItems ChangelogItem[]
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@map("ai_generations")
+}
+
+/// Widget impression. `visitorHash` is salted hash of IP+UA for de-duped
+/// counts without storing PII. Heavy analytics live in PostHog.
+model WidgetView {
+  id          String   @id @default(uuid()) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  changelogId String?  @map("changelog_id") @db.Uuid
+  visitorHash String   @map("visitor_hash")
+  countryCode String?  @map("country_code") @db.Char(2)
+  referrer    String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  changelog Changelog? @relation(fields: [changelogId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([changelogId])
+  @@map("widget_views")
+}
+
+/// Hosted-page view. Same shape as WidgetView; split for clean per-channel
+/// aggregation.
+model PageView {
+  id          String   @id @default(uuid()) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  changelogId String?  @map("changelog_id") @db.Uuid
+  visitorHash String   @map("visitor_hash")
+  countryCode String?  @map("country_code") @db.Char(2)
+  referrer    String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  changelog Changelog? @relation(fields: [changelogId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([changelogId])
+  @@map("page_views")
+}
+
+/// Significant action log. `action` is a dotted verb ("changelog.published"),
+/// `resourceId` references whatever resource_type points at. `userId` is
+/// nullable for system-driven actions (webhook handlers, cron jobs).
+model AuditLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  userId       String?  @map("user_id") @db.Uuid
+  action       String
+  resourceType String   @map("resource_type")
+  resourceId   String   @map("resource_id") @db.Uuid
+  metadata     Json?
+  ipAddress    String?  @map("ip_address")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([userId])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// Webhook events
+// ============================================================================
+
+/// Raw GitHub webhook payloads. `deliveryId` is unique so we can dedupe
+/// GitHub's retries. `installationId` is the GitHub-side BIGINT (not a FK to
+/// github_installations.id) so events survive even after the installation
+/// row is removed locally.
+model GithubWebhookEvent {
+  id             String    @id @default(uuid()) @db.Uuid
+  installationId BigInt    @map("installation_id")
+  eventType      String    @map("event_type")
+  deliveryId     String    @unique @map("delivery_id")
+  payload        Json
+  processedAt    DateTime? @map("processed_at") @db.Timestamptz(6)
+  error          String?
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([installationId])
+  @@index([eventType])
+  @@index([processedAt])
+  @@map("github_webhook_events")
 }
