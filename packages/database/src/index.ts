@@ -1,11 +1,11 @@
 import { PrismaPg } from '@prisma/adapter-pg'
 
-import { PrismaClient } from '../generated/prisma/client.ts'
+import { PrismaClient } from '../generated/prisma/client.js'
 
 // Re-export the generated types so consumers can do
 // `import { Prisma, type Workspace } from '@shiplog/database'`.
-export * from '../generated/prisma/client.ts'
-export type { PrismaClient } from '../generated/prisma/client.ts'
+export * from '../generated/prisma/client.js'
+export type { PrismaClient } from '../generated/prisma/client.js'
 
 // Prisma 7 deprecated the Rust query engine; PrismaClient now requires a
 // driver adapter. `@prisma/adapter-pg` wraps node-postgres and reads the
