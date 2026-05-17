@@ -1,6 +1,6 @@
 import { headers } from 'next/headers'
 
-import { auth, type AuthSession } from './auth.js'
+import { auth, type AuthSession } from './auth'
 
 /**
  * Read the current session from a Server Component or Route Handler.

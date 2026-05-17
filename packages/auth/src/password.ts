@@ -1,5 +1,10 @@
 import bcrypt from 'bcrypt'
 
+// Re-export the pure policy function so server-side callers can keep
+// importing it from a single module. Browser-side callers should import
+// from `@shiplog/auth/policy` directly to avoid pulling in bcrypt.
+export { validatePasswordPolicy } from './password-policy.js'
+
 /**
  * Bcrypt work factor for password hashing. Cost 12 = ~250ms per hash on
  * modern hardware — slow enough to be expensive to brute-force, fast enough
@@ -24,25 +29,4 @@ export async function verifyPassword(input: {
   password: string
 }): Promise<boolean> {
   return bcrypt.compare(input.password, input.hash)
-}
-
-/**
- * Enforce the documented password policy: 8+ chars, at least one letter,
- * at least one number. Called from the sign-up form before submitting to
- * Better Auth. Better Auth itself only enforces length.
- *
- * Returns `null` on success, or a user-safe error message on failure.
- * The message is intentionally generic — it should not reveal *which*
- * rule was violated in a way that helps password-spraying attackers.
- */
-export function validatePasswordPolicy(password: string): string | null {
-  if (password.length < 8) return 'Password must be at least 8 characters.'
-  if (password.length > 128) return 'Password is too long.'
-  if (!/[a-zA-Z]/.test(password)) {
-    return 'Password must include a letter and a number.'
-  }
-  if (!/[0-9]/.test(password)) {
-    return 'Password must include a letter and a number.'
-  }
-  return null
 }

@@ -1,7 +1,7 @@
 import { createAuth } from '@shiplog/auth'
 
-import { createDevEmailService } from './email.js'
-import { webLogger } from './logger.js'
+import { createDevEmailService } from './email'
+import { webLogger } from './logger'
 
 const baseURL = process.env.BETTER_AUTH_URL ?? 'http://localhost:3000'
 const secret = process.env.BETTER_AUTH_SECRET

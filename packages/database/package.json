@@ -3,24 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
     },
     "./client": {
-      "types": "./generated/prisma/client.ts",
-      "default": "./generated/prisma/client.ts"
+      "types": "./dist/generated/prisma/client.d.ts",
+      "default": "./dist/generated/prisma/client.js"
     }
   },
   "files": [
+    "dist",
     "src",
     "generated",
     "prisma"
   ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "build:watch": "tsc -p tsconfig.build.json --watch",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:migrate:create": "prisma migrate dev --create-only",

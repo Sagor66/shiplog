@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useState } from 'react'
 
-import { validatePasswordPolicy } from '@shiplog/auth'
+import { validatePasswordPolicy } from '@shiplog/auth/policy'
 
 import { signIn, signUp } from '@/lib/auth-client'
 
